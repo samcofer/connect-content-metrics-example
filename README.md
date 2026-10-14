@@ -30,6 +30,7 @@ So for scheduled reports / renders, `cpu_fraction` and `memory_bytes` undercount
 | --- | --- |
 | `metrics-client/get_connect_metrics.py` | Pulls the built-in per-content job metrics via the REST API into a tidy pandas DataFrame + CSV/Parquet, with per-job peak/mean summaries. Good for interactive content. |
 | `content-monitor/` | **The investigation result.** An interactive Shiny-for-Python app you deploy to Connect that measures the *true* real-time CPU/memory of **all** running content — including renders — by joining OS-level `/proc` subtree accounting with Connect's `GET /__api__/metrics/procs` PID→content mapping. Reports it live and records it to CSV. |
+| `reprex-static-render/` | A self-contained ~5-minute Jupyter render that measures its own CPU/memory and contrasts it with what Connect records for the same job — conclusively showing the rendered-content undercount (self 3.99 cores / 1546 MB vs Connect 0 / 27 MB). Includes the upstream-issue search result. |
 | `capacity-gate/` | A Quarto document (R + Python) that defers a resource-intensive section until the host has ≥ 4 GB free memory and ≥ 2 free CPU cores, with standalone reusable gate functions. |
 | `examples/fastapi-load-app/` | A tiny FastAPI app that holds ~1.2 GB and burns CPU on demand — used to generate a measurable load for the tools above. |
 | `scripts/` | Reproducible steps used to stand up the Connect test server (install, bootstrap an admin API key, register R/Python/Quarto, deploy a load app). Reference only; they encode no secrets. |

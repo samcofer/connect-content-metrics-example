@@ -1,0 +1,15 @@
+Static-render under-reporting reprex — rendered output (job lXgoyddaytLO3IOj, Connect 2026.10.0)
+
+self pid=21875  content-guid=34168a8d-8741-44dd-a68a-8c1575614fd5  job-key=lXgoyddaytLO3IOj  host cores=4
+collected 54 self-measured samples over ~270s (HOLD retains 1.50 GB)
+
+SELF-MEASURED (ground truth, /proc subtree of the kernel):
+  CPU cores : peak=3.99  mean=3.33
+  RSS   (MB): peak=1546  mean=1546
+
+Connect per-job metric samples for this render (lXgoyddaytLO3IOj): 31
+  contrast:   CPU (cores)  self_measured_peak=3.99   connect_reported_peak=0.000
+              Memory (MB)  self_measured_peak=1546   connect_reported_peak=27
+
+VERDICT: for this render Connect UNDER-REPORTS CPU by infinite (Connect reported 0) and memory by ~56x.
+Render ran 2026-10-14 14:38:54Z -> 14:44:15Z (321s, exit_code 0).
