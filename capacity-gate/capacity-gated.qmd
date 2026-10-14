@@ -1,0 +1,317 @@
+---
+title: "Capacity-gated rendering"
+format: html
+engine: knitr
+execute:
+  warning: false
+  echo: true
+---
+
+This document defers each **resource-intensive section** until the host has enough
+spare capacity: at least `MIN_FREE_GB` of *available* memory **and** at least
+`MIN_FREE_CORES` free CPU cores. Both an R gate and a Python gate are shown.
+
+A single shared time budget (`MAX_WAIT_SECONDS`) is split across the two gates, so the
+render never blocks for more than that in total. If the budget is exhausted the heavy
+section is **skipped** (default) or run anyway (`ON_TIMEOUT = "proceed"`). On a host
+where capacity cannot be measured (non-Linux / no `/proc`), the gate cannot block work
+it cannot see, so it proceeds with a warning.
+
+```{r}
+#| label: config
+MIN_FREE_GB      <- 4      # GB, decimal (1e9 bytes), to match "4 GB"
+MIN_FREE_CORES   <- 2
+POLL_SECONDS     <- 5
+MAX_WAIT_SECONDS <- 120
+ON_TIMEOUT       <- "skip" # "skip" | "proceed"
+
+# Point reticulate at a Python that has the gate's optional deps (psutil, and numpy for
+# the heavy demo). Set RETICULATE_PYTHON to that interpreter; falls back to PATH python3.
+suppressMessages(library(reticulate))
+.pyexe <- Sys.getenv("RETICULATE_PYTHON", unset = Sys.which("python3")[[1]])
+if (nzchar(.pyexe) && file.exists(.pyexe)) use_python(.pyexe, required = TRUE)
+
+# One monotonic-ish deadline shared by BOTH gates (proc.time elapsed is measured from
+# R start, not the wall clock, so an NTP step of time-of-day won't move it).
+.elapsed <- function() as.numeric(proc.time()[["elapsed"]])
+GATE_DEADLINE <- .elapsed() + MAX_WAIT_SECONDS
+```
+
+## R capacity gate
+
+```{r}
+#| label: r-gate-functions
+# ---- Linux-aware host capacity gate (base R only) ----
+.read_meminfo_avail_bytes <- function() {
+  if (!file.exists("/proc/meminfo")) return(NA_real_)
+  mi <- tryCatch(readLines("/proc/meminfo"), error = function(e) character(0))
+  line <- grep("^MemAvailable:", mi, value = TRUE)
+  if (!length(line)) return(NA_real_)
+  as.numeric(gsub("[^0-9]", "", line)) * 1024
+}
+.cgroup_v2_mem_avail_bytes <- function() {
+  mx <- "/sys/fs/cgroup/memory.max"; cur <- "/sys/fs/cgroup/memory.current"
+  if (!file.exists(mx) || !file.exists(cur)) return(NA_real_)
+  mxv <- tryCatch(readLines(mx, n = 1), error = function(e) "max")
+  if (identical(mxv, "max") || !nzchar(mxv)) return(NA_real_)
+  curv <- tryCatch(as.numeric(readLines(cur, n = 1)), error = function(e) NA_real_)
+  if (is.na(curv)) return(NA_real_)
+  max(0, as.numeric(mxv) - curv)
+}
+mem_available_bytes <- function() {
+  vals <- c(.read_meminfo_avail_bytes(), .cgroup_v2_mem_avail_bytes())
+  vals <- vals[!is.na(vals)]
+  if (!length(vals)) NA_real_ else min(vals)  # tightest binding constraint
+}
+.read_proc_stat_totals <- function() {
+  if (!file.exists("/proc/stat")) return(NULL)
+  l <- tryCatch(readLines("/proc/stat", n = 1), error = function(e) NA_character_)
+  if (is.na(l[1]) || !grepl("^cpu ", l[1])) return(NULL)
+  v <- as.numeric(strsplit(trimws(sub("^cpu ", "", l[1])), "\\s+")[[1]])
+  list(idle = sum(v[c(4, 5)]), total = sum(v))  # idle + iowait
+}
+.ncpu_effective <- function() {
+  n <- tryCatch(parallel::detectCores(logical = TRUE), error = function(e) NA_integer_)
+  if (is.na(n)) n <- 1L
+  cm <- "/sys/fs/cgroup/cpu.max"
+  if (file.exists(cm)) {
+    p <- tryCatch(strsplit(readLines(cm, n = 1), "\\s+")[[1]], error = function(e) character(0))
+    if (length(p) == 2 && p[1] != "max") {
+      q <- suppressWarnings(as.numeric(p[1])); per <- suppressWarnings(as.numeric(p[2]))
+      if (!is.na(q) && !is.na(per) && per > 0) n <- min(n, max(1, floor(q / per)))
+    }
+  }
+  n
+}
+cpu_free_cores <- function(sample_seconds = 0.5) {
+  a <- .read_proc_stat_totals(); if (is.null(a)) return(NA_real_)
+  Sys.sleep(sample_seconds)
+  b <- .read_proc_stat_totals(); if (is.null(b)) return(NA_real_)
+  dt <- b$total - a$total; di <- b$idle - a$idle
+  if (dt <= 0) return(NA_real_)
+  util <- min(1, max(0, 1 - di / dt))
+  .ncpu_effective() * (1 - util)
+}
+wait_for_capacity <- function(min_free_gb, min_free_cores, poll_seconds,
+                              deadline_elapsed, log = TRUE) {
+  GB <- 1e9; start <- .elapsed()
+  max_iter <- as.integer((deadline_elapsed - start) / max(0.1, poll_seconds)) + 5L
+  it <- 0L
+  repeat {
+    it <- it + 1L
+    mem_b <- mem_available_bytes(); cores <- cpu_free_cores()
+    mem_gb <- if (is.na(mem_b)) NA_real_ else mem_b / GB
+    unknown <- is.na(mem_gb) || is.na(cores)
+    ok <- !unknown && mem_gb >= min_free_gb && cores >= min_free_cores
+    if (log) message(sprintf(
+      "[capacity/R] t+%4.0fs free_mem=%s GB free_cores=%s need(>=%gGB,>=%g) -> %s",
+      .elapsed() - start,
+      if (is.na(mem_gb)) "NA" else sprintf("%.2f", mem_gb),
+      if (is.na(cores)) "NA" else sprintf("%.2f", cores),
+      min_free_gb, min_free_cores,
+      if (unknown) "UNKNOWN" else if (ok) "OK" else "WAIT"))
+    if (unknown) return(list(ok = FALSE, unknown = TRUE, timed_out = FALSE, mem_gb = mem_gb, cores = cores, waited = .elapsed() - start))
+    if (ok)      return(list(ok = TRUE,  unknown = FALSE, timed_out = FALSE, mem_gb = mem_gb, cores = cores, waited = .elapsed() - start))
+    if (.elapsed() >= deadline_elapsed || it >= max_iter)
+                 return(list(ok = FALSE, unknown = FALSE, timed_out = TRUE,  mem_gb = mem_gb, cores = cores, waited = .elapsed() - start))
+    Sys.sleep(poll_seconds)
+  }
+}
+```
+
+```{r}
+#| label: r-gate
+r_dec <- wait_for_capacity(MIN_FREE_GB, MIN_FREE_CORES, POLL_SECONDS, GATE_DEADLINE)
+# Proceed when capacity is OK; on timeout honor ON_TIMEOUT; if capacity is unmeasurable
+# (non-Linux) we cannot gate what we cannot see, so proceed with a warning.
+r_run_heavy <- isTRUE(r_dec$ok) ||
+  (isTRUE(r_dec$timed_out) && ON_TIMEOUT == "proceed") ||
+  isTRUE(r_dec$unknown)
+# Share the remaining budget with the Python gate so combined wait <= MAX_WAIT_SECONDS.
+REMAINING_BUDGET <- max(1, MAX_WAIT_SECONDS - r_dec$waited)
+cat(sprintf("R gate: ok=%s timed_out=%s unknown=%s free_mem=%.2fGB free_cores=%.2f -> run_heavy=%s\n",
+  r_dec$ok, r_dec$timed_out, r_dec$unknown,
+  ifelse(is.na(r_dec$mem_gb), -1, r_dec$mem_gb),
+  ifelse(is.na(r_dec$cores), -1, r_dec$cores), r_run_heavy))
+```
+
+```{r}
+#| label: r-heavy
+#| eval: !expr isTRUE(r_run_heavy)
+# Resource-intensive R section (~1.5 GB working set + CPU spin, approximating the gate).
+n <- as.integer(1.5e9 / 8)
+big <- numeric(n); big[] <- 1  # force allocation
+peak_gb <- as.numeric(object.size(big)) / 1e9
+m <- matrix(rnorm(1200 * 1200), 1200)
+t0 <- .elapsed(); iters <- 0
+while (.elapsed() - t0 < 4) { m <- m %*% m; m <- m / (norm(m, "F") + 1e-12); iters <- iters + 1 }
+cat(sprintf("R heavy section RAN: allocated ~%.2f GB, %d matmul iters\n", peak_gb, iters))
+rm(big); invisible(gc())
+```
+
+```{r}
+#| label: r-skip
+#| eval: !expr isFALSE(r_run_heavy)
+cat("::: callout-warning\n")
+cat("### R heavy section SKIPPED\n")
+cat(sprintf("Insufficient capacity within the %ds budget (needed >=%gGB free and >=%g free cores).\n",
+  MAX_WAIT_SECONDS, MIN_FREE_GB, MIN_FREE_CORES))
+cat(":::\n")
+```
+
+## Python capacity gate
+
+```{python}
+#| label: py-gate-functions
+import os, time
+
+def _meminfo_avail_bytes():
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+def _cgroup_v2_mem_avail_bytes():
+    try:
+        with open("/sys/fs/cgroup/memory.max") as fh:
+            mx = fh.read().strip()
+        if mx in ("", "max"):
+            return None
+        with open("/sys/fs/cgroup/memory.current") as fh:
+            cur = int(fh.read().strip())
+        return max(0, int(mx) - cur)
+    except (OSError, ValueError):
+        return None
+
+def mem_available_bytes():
+    vals = []
+    try:
+        import psutil
+        vals.append(psutil.virtual_memory().available)
+    except Exception:
+        m = _meminfo_avail_bytes()
+        if m is not None:
+            vals.append(m)
+    cg = _cgroup_v2_mem_avail_bytes()
+    if cg is not None:
+        vals.append(cg)
+    return min(vals) if vals else None
+
+def _ncpu_effective():
+    try:
+        n = len(os.sched_getaffinity(0))   # respects cpuset / affinity
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as fh:
+            parts = fh.read().split()
+        if len(parts) == 2 and parts[0] != "max":
+            quota, period = float(parts[0]), float(parts[1])
+            if period > 0:
+                n = min(n, max(1, int(quota // period)))
+    except (OSError, ValueError):
+        pass
+    return n
+
+def _cpu_util_fraction(sample_seconds=0.5):
+    try:
+        import psutil
+        return min(1.0, max(0.0, psutil.cpu_percent(interval=sample_seconds) / 100.0))
+    except Exception:
+        pass
+    def read():
+        try:
+            with open("/proc/stat") as fh:
+                parts = fh.readline().split()
+        except OSError:
+            return None
+        if not parts or parts[0] != "cpu":
+            return None
+        v = [float(x) for x in parts[1:]]
+        idle = v[3] + (v[4] if len(v) > 4 else 0.0)
+        return idle, sum(v)
+    a = read()
+    if a is None:
+        return None
+    time.sleep(sample_seconds)
+    b = read()
+    if b is None:
+        return None
+    dt = b[1] - a[1]
+    di = b[0] - a[0]
+    return min(1.0, max(0.0, 1 - di / dt)) if dt > 0 else None
+
+def cpu_free_cores(sample_seconds=0.5):
+    util = _cpu_util_fraction(sample_seconds)
+    return None if util is None else _ncpu_effective() * (1 - util)
+
+def wait_for_capacity(min_free_gb, min_free_cores, poll_seconds, max_wait_seconds, log=True):
+    GB = 1e9
+    start = time.monotonic()               # monotonic: immune to clock steps
+    deadline = start + max_wait_seconds
+    while True:
+        mem_b = mem_available_bytes()
+        cores = cpu_free_cores()
+        mem_gb = None if mem_b is None else mem_b / GB
+        unknown = mem_gb is None or cores is None
+        ok = (not unknown) and mem_gb >= min_free_gb and cores >= min_free_cores
+        if log:
+            print("[capacity/py] t+%4.0fs free_mem=%s GB free_cores=%s need(>=%gGB,>=%g) -> %s" % (
+                time.monotonic() - start,
+                "NA" if mem_gb is None else "%.2f" % mem_gb,
+                "NA" if cores is None else "%.2f" % cores,
+                min_free_gb, min_free_cores,
+                "UNKNOWN" if unknown else ("OK" if ok else "WAIT")), flush=True)
+        if unknown:
+            return {"ok": False, "unknown": True, "timed_out": False, "mem_gb": mem_gb, "cores": cores, "waited": time.monotonic() - start}
+        if ok:
+            return {"ok": True, "unknown": False, "timed_out": False, "mem_gb": mem_gb, "cores": cores, "waited": time.monotonic() - start}
+        if time.monotonic() >= deadline:
+            return {"ok": False, "unknown": False, "timed_out": True, "mem_gb": mem_gb, "cores": cores, "waited": time.monotonic() - start}
+        time.sleep(poll_seconds)
+```
+
+```{python}
+#| label: py-gate
+# Reuse the remaining shared budget from the R gate (reticulate exposes R vars as r.*).
+py_dec = wait_for_capacity(
+    min_free_gb=float(r.MIN_FREE_GB),
+    min_free_cores=float(r.MIN_FREE_CORES),
+    poll_seconds=float(r.POLL_SECONDS),
+    max_wait_seconds=float(r.REMAINING_BUDGET),
+)
+py_run_heavy = bool(py_dec["ok"]) or (py_dec["timed_out"] and str(r.ON_TIMEOUT) == "proceed") or py_dec["unknown"]
+print("Python gate:", py_dec, "-> run_heavy =", py_run_heavy)
+```
+
+```{r}
+#| label: py-decide
+# Surface the Python decision to R so knitr can gate the Python heavy/skip chunks.
+py_run_heavy <- isTRUE(py$py_run_heavy)
+```
+
+```{python}
+#| label: py-heavy
+#| eval: !expr isTRUE(py_run_heavy)
+import numpy as np, time
+hold = np.ones(int(1.2e9 // 8), dtype=np.float64)
+hold += 1.0  # touch pages
+x = np.random.rand(1200, 1200)
+t0 = time.time(); iters = 0
+while time.time() - t0 < 4:
+    x = x @ x
+    x = x / (np.linalg.norm(x) + 1e-12)
+    iters += 1
+print("Python heavy section RAN: held ~%.2f GB, %d matmul iters" % (hold.nbytes / 1e9, iters))
+del hold
+```
+
+```{python}
+#| label: py-skip
+#| eval: !expr isFALSE(py_run_heavy)
+print("Python heavy section SKIPPED: insufficient capacity within the shared time budget.")
+```

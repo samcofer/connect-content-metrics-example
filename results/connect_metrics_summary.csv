@@ -1,0 +1,5 @@
+content_title,content_guid,job_key,job_tag,samples,duration_s,cpu_peak,cpu_mean,mem_peak_mb,mem_mean_mb
+cpu-mem-api,ed0015bc-0eb8-4879-ae2d-e3604abb0daf,MevRYfd7ST3mENu6,run_fastapi_app,29,280.0,4.0,1.795,1249.1,1194.8
+cpu-mem-api,ed0015bc-0eb8-4879-ae2d-e3604abb0daf,klLnf6tJcqP7byNZ,run_fastapi_app,13,120.0,0.01,0.002,1218.1,1124.6
+cpu-mem-burn,4c2cfa94-fb3c-4648-a314-eba5dd24042a,XpmzaJijjgiaiv8g,build_jupyter,10,90.0,0.0,0.0,26.7,24.2
+cpu-mem-burn,4c2cfa94-fb3c-4648-a314-eba5dd24042a,kYpSj5GEt5l1MkMJ,build_jupyter,10,90.0,0.0,0.0,26.6,24.1

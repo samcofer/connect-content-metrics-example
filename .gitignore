@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.lic
+connect_api_key
+*.log
+.DS_Store
+/examples/**/rsconnect-python/
