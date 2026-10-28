@@ -1,134 +1,114 @@
-# Per-content resource utilization to Datadog via OpenTelemetry
+# Per-content resource metrics via OpenTelemetry traces
 
 Getting **per-content CPU and memory** out of Posit Connect and into Datadog (or
-any OTLP backend) using OpenTelemetry — what works, what doesn't, and a working,
-proven sidecar that does it.
+any OTLP backend) when true OpenTelemetry *metrics* from content can't be used.
+The trick: the content defines its own **custom span**, records CPU/memory as
+span attributes, and marks the span `is_public` so Connect forwards it to the
+Connect-configured OTLP destination. No sidecar, no separate agent process, no
+per-content endpoint override.
 
-Everything here was verified end-to-end on a disposable **Posit Connect
-2026.10.0** server (Ubuntu 24.04), with R 4.5.1, Python 3.12.11, and a local
-OpenTelemetry Collector standing in for the Datadog Agent. The collector's
-file-exporter captures are checked in under [`evidence/`](evidence/).
+Verified end-to-end on a disposable **Posit Connect 2026.10.0** server
+(Ubuntu 24.04). Captures are in [`evidence/`](evidence/).
 
-## Bottom line
+## Why traces instead of metrics
 
-| Goal: per-content signal in Datadog via OTel | Works today (2026.10.0)? | How |
-| --- | --- | --- |
-| Per-content **CPU / memory** | ✅ **with the sidecar here** | [`content-metrics-otel/`](content-metrics-otel/) exports `connect.content.cpu.cores` / `.cpu.utilization` / `.memory.rss_bytes`, tagged `content.guid`, directly to the Agent |
-| Per-content **execution** (duration, success/failure) | ✅ **natively, no code** | Connect emits `job.duration` + `job.completion` with `content.guid` / `content.name` data-point attributes; enable `[OpenTelemetry]` + an `[OTLPEndpoint]` with `Metrics = true` |
-| Per-content **traces** (request latency, spans) | ⚠️ **retained in Connect, not forwarded** | content traces land in local files + the `GET /__api__/v1/content/{guid}/traces` API, not at the external endpoint; a content-env `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` override can push them to the Agent directly |
-| Content item **emitting its own custom metrics** through Connect's OTel | ❌ **dropped** | Connect's embedded collector has no content-metrics pipeline — see [`evidence/connect-collector-pipeline.md`](evidence/connect-collector-pipeline.md) |
+Connect injects an OpenTelemetry SDK into instrumented content and sets
+`OTEL_METRICS_EXPORTER=otlp`, so content *can* record metrics. But Connect's
+embedded collector has **no content-metrics pipeline**: content-origin metrics
+(`service.name = posit-connect-content-<guid>`) are filtered out before the
+external `[OTLPEndpoint]`. Confirmed on the live server (the content's own
+`force_flush()` succeeds but nothing arrives) and in the Connect source
+(`src/connect/otel/collector/config.go`: *"there is no content metrics
+pipeline"*). So true content metrics are a dead end for Datadog.
 
-The important negative result: **you cannot get per-content CPU/RAM by having
-each content item emit OpenTelemetry metrics about itself.** Connect injects an
-OTel SDK and sets `OTEL_METRICS_EXPORTER=otlp` in the content process, the
-content's `force_flush()` succeeds against Connect's embedded collector — and
-then the collector drops it, because content-origin metrics are filtered out
-before the external endpoint and there is no content-metrics pipeline. This is
-in the Connect source, not a misconfiguration (citation in the evidence doc).
-Content traces and logs are not dropped but they are **retained inside Connect**
-(local files + the content traces API), not fanned out to your external endpoint
-by default.
+Traces are different. Content spans are emitted and captured, and they carry the
+content resource attributes (`content.guid`, `job.key`, ...). By default they
+are **retained inside Connect** (local files + the
+`GET /__api__/v1/content/{guid}/traces` API) and not forwarded, because Connect
+runs its external ("customer") trace pipeline behind a filter that keeps only
+spans whose `is_public` attribute is `true` (the `OpenTelemetry.PublicTracesOnly`
+setting, on by default). A content item can set that attribute on its own span.
 
-So per-content CPU/RAM has to be measured **out of band** and shipped straight
-to the Agent. That's the sidecar.
+## The technique (verified)
 
-## 1. The sidecar — per-content CPU/RAM → Datadog Agent (the answer)
+In the content, open a custom span, attach the resource numbers as attributes,
+and set `is_public = true`:
 
-[`content-metrics-otel/emit_content_metrics_otel.py`](content-metrics-otel/emit_content_metrics_otel.py)
+```python
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
-One process (a Connect scheduled job, a Launcher job, or a host service) measures
-the **true** per-content CPU/memory for *all* running content and exports it as
-OTLP gauges straight to the local OTLP endpoint — bypassing Connect's embedded
-collector, so the content-metrics drop does not apply. It gets accurate numbers
-by joining Connect's PID→content map (`GET /__api__/metrics/procs`) with `/proc`
-subtree accounting, which also fixes the rendered-content undercount that the
-built-in REST metric suffers from (see this repo's `content-monitor/`).
+tracer = trace.get_tracer("ird.content.resource")
 
-Metrics emitted each interval, one data point per running content proc-group:
-
-| Metric | Unit | Meaning |
-| --- | --- | --- |
-| `connect.content.cpu.cores` | `{cpu}` | CPU cores in use by the content process subtree |
-| `connect.content.cpu.utilization` | `1` | the above as a fraction of host CPU count |
-| `connect.content.memory.rss_bytes` | `By` | RSS of the content process subtree |
-
-Every point carries `content.guid`, `content.name`, `content.type`, `run_as`.
-
-```bash
-pip install -r content-metrics-otel/requirements.txt
-CONNECT_SERVER=http://localhost:3939 \
-CONNECT_API_KEY=<admin-key> \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \   # the Datadog Agent's OTLP intake
-OTEL_RESOURCE_ATTRIBUTES=service.namespace=my-connect \
-  python content-metrics-otel/emit_content_metrics_otel.py --interval 10
+with tracer.start_as_current_span("content.resource.sample", kind=SpanKind.INTERNAL) as span:
+    span.set_attribute("is_public", True)                 # opt into the external pipeline
+    span.set_attribute("content.memory.rss_bytes", rss)   # from /proc/self
+    span.set_attribute("content.cpu.user_seconds", utime)
+    span.set_attribute("content.cpu.system_seconds", stime)
 ```
 
-Proven output (from [`evidence/sidecar-signal-inventory.txt`](evidence/sidecar-signal-inventory.txt),
-captured while a FastAPI item burned CPU on a 2-core host):
+Connect auto-ingests the span through its embedded collector and forwards it to
+the configured `[OTLPEndpoint]` (the Datadog Agent), tagged with the content
+resource attributes. Full examples:
+
+- [`content-trace-metrics/python/app.py`](content-trace-metrics/python/app.py) — FastAPI, verified.
+- [`content-trace-metrics/r/plumber.R`](content-trace-metrics/r/plumber.R) — the R parallel via the `otel` package (needs `otelsdk`; see caveats).
+
+### Proof
+
+With `is_public = true` (from [`evidence/spans-external-with-ispublic.txt`](evidence/spans-external-with-ispublic.txt)), the custom spans reach the external endpoint:
 
 ```
-connect.content.cpu.cores        content.guid=bd9b0747-...  value=0.912
-connect.content.cpu.utilization  content.guid=bd9b0747-...  value=0.456
-connect.content.memory.rss_bytes content.guid=bd9b0747-...  value=72282112
+service.name = posit-connect-content-28f28464-...   <== CONTENT PROCESS
+  content.guid = 28f28464-...   job.key = qgoGsntXG1rwk5wc
+  content.resource.sample  x8
+     content.cpu.user_seconds=2.44  content.memory.rss_bytes=78827520  content.process.num_threads=5
 ```
 
-For production, point `OTEL_EXPORTER_OTLP_ENDPOINT` at the node-local Datadog
-Agent (the Agent authenticates to the Datadog backend). The three gauges map
-cleanly onto Datadog metrics you can group by `content.guid` / `content.name`.
+Without it ([`evidence/spans-dropped-without-ispublic.txt`](evidence/spans-dropped-without-ispublic.txt)), zero reach the endpoint; they are still captured in Connect's traces API ([`evidence/content-traces-api-sample.ndjson`](evidence/content-traces-api-sample.ndjson)). The only difference is the one attribute.
 
-## 2. Content self-emitting metrics — the pattern, and why it's dropped
+## Server setup
 
-[`content-self-emit/`](content-self-emit/) has a Python (FastAPI) and an R
-(Plumber) content item that record custom OpenTelemetry metrics the documented
-way — through Connect's injected SDK, no exporter wiring. The code is correct and
-forward-compatible: if Connect adds a content-metrics pipeline, these just start
-flowing. Today they are accepted by the embedded collector and then filtered out
-before the external endpoint (see the evidence doc). Use these to understand the
-publisher-side API; use the sidecar to actually get metrics to Datadog.
-
-Two things verified while deploying these:
-
-- **Python** uses Connect's injected SDK (the bundle does not ship
-  `opentelemetry-sdk`). With Traces enabled, the worker gets the full `OTEL_*`
-  environment and the metrics API works; from inside the worker `force_flush()`
-  succeeds, confirming the drop happens at Connect's collector, not in the
-  content.
-- **R** content telemetry needs the `otelsdk` package, which Connect installs on
-  the telemetry rebuild. `otelsdk` is Rust-backed: on a host without a Rust
-  toolchain (or a matching prebuilt binary in the repo) its source install fails
-  and Connect logs *"failed to install otelsdk ... Trace collection will be
-  unavailable"*. The `otel` API package still loads, but `get_meter()` returns a
-  no-op, so nothing is emitted. Plan for a Rust toolchain (or a binary `otelsdk`)
-  on R nodes if you want R content telemetry. Either way, R content CPU/RAM is
-  covered by the sidecar.
-
-## 3. Server setup
-
-[`setup/rstudio-connect.otel.gcfg`](setup/rstudio-connect.otel.gcfg) — the
-`[OpenTelemetry]` + `[OTLPEndpoint]` block to merge into
-`/etc/rstudio-connect/rstudio-connect.gcfg`. Point the endpoint at the local
-Datadog Agent. This is what turns on the native per-job metrics (`job.duration`,
-`job.completion`) and content-trace retention.
+[`setup/rstudio-connect.otel.gcfg`](setup/rstudio-connect.otel.gcfg) — `[OpenTelemetry]`
+plus an `[OTLPEndpoint]` pointed at the node-local Datadog Agent. Nothing extra is
+needed for the per-span `is_public` approach; the default `PublicTracesOnly`
+keeps everything else on-host.
 
 [`setup/otelcol-capture.yaml`](setup/otelcol-capture.yaml) — the lab stand-in for
-the Datadog Agent: an OpenTelemetry Collector that writes every received signal
-to a file so you can see exactly what Connect exports. Note the one gotcha: set
-`service.telemetry.metrics.level: none`, or its default `:8888` Prometheus port
-collides with Connect's embedded collector and Connect won't start.
+the Datadog Agent (an OpenTelemetry Collector writing received signals to a
+file). One gotcha: set `service.telemetry.metrics.level: none`, or its default
+`:8888` Prometheus port collides with Connect's embedded collector and Connect
+won't start.
+
+## Caveats (read before shipping)
+
+- **`is_public` is an internal mechanism.** `OpenTelemetry.PublicTracesOnly` and
+  the `is_public` attribute are marked `internal` in Connect's settings; they are
+  not (yet) a documented, supported contract. The technique works on 2026.10.0,
+  but confirm with Posit before depending on it long term.
+- **Server-wide alternative:** setting `OpenTelemetry.PublicTracesOnly = false`
+  forwards *all* content spans to the external endpoint (no per-span attribute),
+  at the cost of exporting every content span. Also an internal setting.
+- **Documented alternative:** a content item can bypass Connect's collector
+  entirely by setting `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in its own environment
+  to the Agent. That path is documented, but Connect then stops retaining those
+  traces.
+- **Coverage:** this only covers content that includes the instrumentation and is
+  running. Rendered reports and uninstrumented content won't self-report.
+- **Semantics:** CPU/memory are gauges; carrying them as span attributes works
+  and Datadog can derive span-based metrics from them, but it is a trace-shaped
+  workaround for the fact that content metrics can't be exported.
+- **R:** needs `otelsdk` (Rust-backed); on a host without a Rust toolchain or a
+  prebuilt binary it fails to install and R tracing is unavailable. The R example
+  here was not live-verified for that reason.
 
 ## Reproducing
 
-1. Install Connect 2026.10.0; register R / Python / Quarto; add the `[OpenTelemetry]`
-   + `[OTLPEndpoint]` config; restart.
+1. Install Connect 2026.10.0; register Python (and R); add the `[OpenTelemetry]` +
+   `[OTLPEndpoint]` config; restart.
 2. Run a collector (or the Datadog Agent) on the OTLP endpoint.
-3. Deploy the content in `content-self-emit/`; enable **Traces** on each
+3. Deploy `content-trace-metrics/python`; enable Traces
    (`PATCH /v1/content/{guid} {"otel_enabled": true}`).
-4. Run the sidecar from `content-metrics-otel/`.
-5. Inspect what arrives. The captures in `evidence/` are the reference.
-
-## Evidence
-
-- [`evidence/sidecar-capture.sample.jsonl`](evidence/sidecar-capture.sample.jsonl) + [`sidecar-signal-inventory.txt`](evidence/sidecar-signal-inventory.txt) — the sidecar's per-content CPU/RAM arriving at the endpoint.
-- [`evidence/connect-collector-signal-inventory.txt`](evidence/connect-collector-signal-inventory.txt) — what reaches the external endpoint from the content-self-emit test: content custom metrics absent; native `job.duration`/`job.completion` present with `content.guid` data-point attributes.
-- [`evidence/content-traces-api-sample.ndjson`](evidence/content-traces-api-sample.ndjson) — content request traces retained in Connect (read via the traces API), tagged `content.guid`/`job.key`.
-- [`evidence/connect-collector-pipeline.md`](evidence/connect-collector-pipeline.md) — the Connect-source reason content metrics are dropped and traces/logs stay local.
+4. Exercise it and watch the `content.resource.sample` spans arrive at the
+   endpoint with the CPU/memory attributes. The captures in `evidence/` are the
+   reference.

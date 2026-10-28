@@ -1,0 +1,22 @@
+=== spans at external endpoint, by service.name ===
+  [posit-connect]
+     span names (3): ['GET', 'api.service.request.handle', 'worker.connection.await']
+  [posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e]  <== CONTENT PROCESS
+     content.guid = 28f28464-e493-4307-aa98-a42b25569b4e  job.key = qgoGsntXG1rwk5wc
+     span names (1): ['content.resource.sample']
+
+=== custom 'content.resource.sample' spans reaching the external endpoint: 8 ===
+  service=posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e content.guid=28f28464-e493-4307-aa98-a42b25569b4e
+     {"workload.duration_ms": 27.575, "content.cpu.user_seconds": 2.23, "content.cpu.system_seconds": 0.16, "content.memory.rss_bytes": "77918208", "content.process.num_threads": "5", "workload.batch": "300000"}
+  service=posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e content.guid=28f28464-e493-4307-aa98-a42b25569b4e
+     {"workload.duration_ms": 29.919, "content.cpu.user_seconds": 2.27, "content.cpu.system_seconds": 0.16, "content.memory.rss_bytes": "77918208", "content.process.num_threads": "5", "workload.batch": "300000"}
+  service=posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e content.guid=28f28464-e493-4307-aa98-a42b25569b4e
+     {"workload.duration_ms": 22.547, "content.cpu.user_seconds": 2.3, "content.cpu.system_seconds": 0.16, "content.memory.rss_bytes": "77918208", "content.process.num_threads": "5", "workload.batch": "300000"}
+  service=posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e content.guid=28f28464-e493-4307-aa98-a42b25569b4e
+     {"workload.duration_ms": 24.903, "content.cpu.user_seconds": 2.37, "content.cpu.system_seconds": 0.16, "content.memory.rss_bytes": "78827520", "content.process.num_threads": "5", "workload.batch": "300000"}
+  service=posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e content.guid=28f28464-e493-4307-aa98-a42b25569b4e
+     {"workload.duration_ms": 30.445, "content.cpu.user_seconds": 2.41, "content.cpu.system_seconds": 0.16, "content.memory.rss_bytes": "78827520", "content.process.num_threads": "5", "workload.batch": "300000"}
+  service=posit-connect-content-28f28464-e493-4307-aa98-a42b25569b4e content.guid=28f28464-e493-4307-aa98-a42b25569b4e
+     {"workload.duration_ms": 22.524, "content.cpu.user_seconds": 2.44, "content.cpu.system_seconds": 0.16, "content.memory.rss_bytes": "78827520", "content.process.num_threads": "5", "workload.batch": "300000"}
+
+HEADLINE: custom resource spans at external endpoint = True
