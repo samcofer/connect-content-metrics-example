@@ -1,0 +1,36 @@
+# Local OpenTelemetry Collector used to PROVE what Connect exports, standing in
+# for the Datadog Agent in a lab. It receives OTLP from Connect's [OTLPEndpoint]
+# and writes every signal to a JSON file you can inspect.
+#
+# NOTE: set service.telemetry.metrics.level to none. The collector's own
+# internal telemetry defaults to a Prometheus endpoint on :8888, which collides
+# with Connect's embedded collector (it also uses :8888) and keeps Connect from
+# starting.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:14318
+      grpc:
+        endpoint: 127.0.0.1:14317
+exporters:
+  file:
+    path: /var/otel-capture/signals.json
+  debug:
+    verbosity: detailed
+service:
+  telemetry:
+    metrics:
+      level: none
+    logs:
+      level: warn
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [file, debug]
+    logs:
+      receivers: [otlp]
+      exporters: [file, debug]
+    traces:
+      receivers: [otlp]
+      exporters: [file, debug]
