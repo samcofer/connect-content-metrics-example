@@ -13,6 +13,12 @@ AllowContentInstrumentation = true
 ; Stamped as the service.namespace resource attribute on every signal
 ; (server, content, package builders). Group/filter by this per environment.
 ServiceNamespace = "ird-sas-demo"
+; PublicTracesOnly defaults to true: the embedded collector only forwards spans
+; whose is_public attribute is true to the [OTLPEndpoint]; everything else stays
+; on-host. The content example sets is_public=true on its own resource span, so
+; leave this at the default. Set it to false ONLY if you want ALL content spans
+; forwarded without the per-span attribute (both are internal settings).
+; PublicTracesOnly = false
 
 ; Fan signals out to a locally running OTLP/HTTP collector or agent.
 ; For Datadog: Endpoint = http://localhost:4318 (the Datadog Agent's OTLP intake).

@@ -1,0 +1,7 @@
+=== spans at external endpoint, by service.name ===
+  [posit-connect]
+     span names (3): ['GET', 'api.service.request.handle', 'schedule.render']
+
+=== custom 'content.resource.sample' spans reaching the external endpoint: 0 ===
+
+HEADLINE: custom resource spans at external endpoint = False
