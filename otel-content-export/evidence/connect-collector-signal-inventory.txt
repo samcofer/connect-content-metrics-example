@@ -1,0 +1,20 @@
+
+==== METRICS at external endpoint ====
+  [posit-connect]
+
+==== TRACES at external endpoint ====
+  [posit-connect]
+
+==== LOGS at external endpoint ====
+  [posit-connect]
+
+==== per-job metric DATA-POINT attribute keys ====
+  job.completion: ['content.guid', 'content.name', 'job.exit_code', 'job.status']
+  job.duration: ['content.guid', 'content.name', 'job.exit_code', 'job.status']
+  process.count: ['process.tag']
+  worker.pool.utilization: ['application.type']
+
+==== HEADLINE ====
+  content custom metric (ird.*) at external endpoint : False
+  any content-process METRICS at external endpoint    : False []
+  any content-process TRACES at external endpoint     : False []

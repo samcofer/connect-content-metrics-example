@@ -1,0 +1,23 @@
+; Posit Connect server configuration for per-content OpenTelemetry export.
+; Add these sections to /etc/rstudio-connect/rstudio-connect.gcfg (merge with
+; your existing [Server]/[Python]/[R]/[Quarto] settings) and restart Connect.
+;
+; In production, point the [OTLPEndpoint] at the LOCAL Datadog Agent's OTLP
+; receiver (the Agent handles auth to the Datadog backend). Connect appends the
+; signal paths (/v1/traces, /v1/logs, /v1/metrics) automatically.
+
+[OpenTelemetry]
+Enabled = true
+; Default is true. Controls whether content processes may be instrumented.
+AllowContentInstrumentation = true
+; Stamped as the service.namespace resource attribute on every signal
+; (server, content, package builders). Group/filter by this per environment.
+ServiceNamespace = "ird-sas-demo"
+
+; Fan signals out to a locally running OTLP/HTTP collector or agent.
+; For Datadog: Endpoint = http://localhost:4318 (the Datadog Agent's OTLP intake).
+[OTLPEndpoint "datadog"]
+Endpoint = "http://127.0.0.1:4318"
+Traces = true
+Logs = true
+Metrics = true
