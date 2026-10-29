@@ -13,21 +13,20 @@ Verified end-to-end on a disposable **Posit Connect 2026.10.0** server
 ## Why traces instead of metrics
 
 Connect injects an OpenTelemetry SDK into instrumented content and sets
-`OTEL_METRICS_EXPORTER=otlp`, so content *can* record metrics. But Connect's
-embedded collector has **no content-metrics pipeline**: content-origin metrics
-(`service.name = posit-connect-content-<guid>`) are filtered out before the
-external `[OTLPEndpoint]`. Confirmed on the live server (the content's own
-`force_flush()` succeeds but nothing arrives) and in the Connect source
-(`src/connect/otel/collector/config.go`: *"there is no content metrics
-pipeline"*). So true content metrics are a dead end for Datadog.
+`OTEL_METRICS_EXPORTER=otlp`, so content *can* record metrics. But content-origin
+metrics (`service.name = posit-connect-content-<guid>`) never reach the external
+`[OTLPEndpoint]`. Verified on a live server: the content's own `force_flush()`
+succeeds, yet no content metric arrives at the endpoint (only server metrics do,
+see [`evidence/connect-collector-signal-inventory.txt`](evidence/connect-collector-signal-inventory.txt)).
+So true content metrics are a dead end for Datadog.
 
 Traces are different. Content spans are emitted and captured, and they carry the
 content resource attributes (`content.guid`, `job.key`, ...). By default they
-are **retained inside Connect** (local files + the
-`GET /__api__/v1/content/{guid}/traces` API) and not forwarded, because Connect
-runs its external ("customer") trace pipeline behind a filter that keeps only
-spans whose `is_public` attribute is `true` (the `OpenTelemetry.PublicTracesOnly`
-setting, on by default). A content item can set that attribute on its own span.
+are **retained inside Connect** (visible through the
+`GET /__api__/v1/content/{guid}/traces` API) and not forwarded. Forwarding to the
+external endpoint is gated by the `OpenTelemetry.PublicTracesOnly` server setting
+(on by default): only spans whose `is_public` attribute is `true` are sent on. A
+content item can set that attribute on its own span.
 
 ## The technique (verified)
 
@@ -47,9 +46,8 @@ with tracer.start_as_current_span("content.resource.sample", kind=SpanKind.INTER
     span.set_attribute("content.cpu.system_seconds", stime)
 ```
 
-Connect auto-ingests the span through its embedded collector and forwards it to
-the configured `[OTLPEndpoint]` (the Datadog Agent), tagged with the content
-resource attributes. Full examples:
+Connect auto-ingests the span and forwards it to the configured `[OTLPEndpoint]`
+(the Datadog Agent), tagged with the content resource attributes. Full examples:
 
 - [`content-trace-metrics/python/app.py`](content-trace-metrics/python/app.py) — FastAPI, verified.
 - [`content-trace-metrics/r/plumber.R`](content-trace-metrics/r/plumber.R) — the R parallel via the `otel` package (needs `otelsdk`; see caveats).
@@ -82,13 +80,13 @@ won't start.
 
 ## Caveats (read before shipping)
 
-- **`is_public` is an internal mechanism.** `OpenTelemetry.PublicTracesOnly` and
-  the `is_public` attribute are marked `internal` in Connect's settings; they are
-  not (yet) a documented, supported contract. The technique works on 2026.10.0,
-  but confirm with Posit before depending on it long term.
+- **`is_public` is undocumented.** `OpenTelemetry.PublicTracesOnly` and the
+  `is_public` attribute are not (yet) a documented, supported contract. The
+  technique works on 2026.10.0, but confirm with Posit before depending on it
+  long term.
 - **Server-wide alternative:** setting `OpenTelemetry.PublicTracesOnly = false`
   forwards *all* content spans to the external endpoint (no per-span attribute),
-  at the cost of exporting every content span. Also an internal setting.
+  at the cost of exporting every content span. Also undocumented.
 - **Documented alternative:** a content item can bypass Connect's collector
   entirely by setting `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in its own environment
   to the Agent. That path is documented, but Connect then stops retaining those

@@ -1,76 +1,54 @@
-# How content signals route in Connect 2026.10.0 (source + live proof)
+# How content signals reach (or don't reach) your OTLP endpoint
 
-Connect runs an embedded OpenTelemetry Collector and fans signals out to the
-`[OTLPEndpoint]` targets you configure. Pipeline topology is built in
-`src/connect/otel/collector/config.go`.
+Observed on a disposable Posit Connect 2026.10.0 server with `[OpenTelemetry]`
+enabled and an `[OTLPEndpoint]` pointed at a local capture collector standing in
+for the Datadog Agent. Everything below is what actually arrived at that
+endpoint. You can reproduce all of it with the captures in this folder, nothing
+here depends on Connect internals.
 
-## Metrics: content-origin metrics are dropped
+## Metrics: content-origin metrics do not arrive
 
-The external `metrics` (and `logs`) pipeline applies a `filter/service_only`
-processor and there is **no content-metrics pipeline**. The code comment:
+Connect instruments content and sets `OTEL_METRICS_EXPORTER=otlp`, so a content
+item can record its own metrics and its `force_flush()` returns success. But none
+of those content metrics (`service.name = posit-connect-content-<guid>`) showed
+up at the external endpoint. Only server/node metrics (`service.name =
+posit-connect`) did (see `connect-collector-signal-inventory.txt`).
 
-> Content processes are told to export metrics too
-> (`OTEL_METRICS_EXPORTER=otlp`), but there is no content metrics pipeline;
-> without the metrics filter they would pollute the node-level metrics file.
+Connect's own per-job metrics `job.duration` / `job.completion` DO arrive,
+carrying `content.guid` / `content.name` / `job.exit_code` / `job.status`
+data-point attributes.
 
-Live proof: a content item recorded a custom counter/gauge through the injected
-SDK; from inside the worker `force_flush()` returned `True`, yet no content
-metric (`service.name = posit-connect-content-*`) reached the external endpoint.
-Only `service.name = posit-connect` metrics did (see
-`connect-collector-signal-inventory.txt`). Connect's own per-job metrics
-`job.duration` / `job.completion` DO export, carrying `content.guid` /
-`content.name` / `job.exit_code` / `job.status` data-point attributes.
+Takeaway: you cannot get content CPU/memory out as OTel *metrics*.
 
-## Traces: forwarded only when the span is `is_public`
+## Traces: forwarded only when the span is marked `is_public`
 
-`OpenTelemetry.PublicTracesOnly` defaults to **true** (confirmed in
-`settings.go` and `settings_onprem.go`; the setting is `internal`). With it on,
-the collector splits traces into two pipelines (resolved config read off the
-live server):
+Content spans are emitted and captured, but by default they are **retained inside
+Connect** (visible through `GET /__api__/v1/content/{guid}/traces`) and are NOT
+forwarded to the external endpoint. Forwarding is gated by the server setting
+`OpenTelemetry.PublicTracesOnly`, which is on by default: only spans whose
+`is_public` attribute is `true` are sent to the `[OTLPEndpoint]`. A content item
+can set that attribute on its own span.
 
-```yaml
-traces/internal:   # full traces -> local files only
-  receivers: [otlp]
-  processors: [batch]
-  exporters: [nop, file/traces]
-traces/customer:   # -> external [OTLPEndpoint]
-  receivers: [otlp]
-  processors: [filter/customer_facing, transform/strip_is_public, ..., batch]
-  exporters: [nop, otlp_http/<endpoint>_traces]
-```
+### Observed
 
-`filter/customer_facing` drops every span whose `is_public` attribute is not
-`true`:
+Same content, same custom span `content.resource.sample`, the only difference is
+the `is_public` attribute:
 
-```yaml
-filter/customer_facing:
-  traces:
-    span:
-      - attributes["is_public"] != true   # drop
-```
-
-The filter checks the **span attribute**, regardless of who set it. Connect's
-own `PublicSpanProcessor` stamps `is_public` only on server spans whose names are
-in a hardcoded registry, but a content item can set the attribute on its own
-span. `transform/strip_is_public` removes the attribute after filtering, so it
-never reaches the backend.
-
-### Live proof
-
-Same content, same custom span `content.resource.sample`, only difference is the
-`is_public` attribute:
-
-| `is_public` on the span | Reaches external `[OTLPEndpoint]`? | In Connect traces API? |
+| `is_public` on the span | Reached external `[OTLPEndpoint]`? | In Connect traces API? |
 | --- | --- | --- |
 | not set (default) | **0 spans** (`spans-dropped-without-ispublic.txt`) | yes (`content-traces-api-sample.ndjson`) |
 | `true` | **8 spans** (`spans-external-with-ispublic.txt`, `.sample.jsonl`) | yes |
 
 The forwarded spans arrive under `service.name = posit-connect-content-<guid>`
 with `content.guid` / `job.key` plus the CPU/memory attributes the content set.
+Note that the `is_public` attribute itself is not present on the exported span
+(grep the `.sample.jsonl`): Connect uses it only to decide what to forward and
+removes it before the span leaves the server.
 
 ## Takeaway
 
 Content CPU/memory cannot leave Connect as OTel *metrics*, but it can as a
 *trace* attribute if the span is marked `is_public` (or if
-`OpenTelemetry.PublicTracesOnly` is turned off server-wide). Both are internal
-mechanisms today.
+`OpenTelemetry.PublicTracesOnly` is turned off server-wide, which forwards all
+content spans). Both `is_public` and `PublicTracesOnly` are undocumented in
+Connect 2026.10.0; confirm with Posit before relying on them long term.

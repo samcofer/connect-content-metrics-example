@@ -1,12 +1,12 @@
 """
 IRD/SAS demo - embedding per-content resource metrics in OpenTelemetry TRACES.
 
-Posit Connect drops content-emitted OTel *metrics* at its embedded collector
-(no content-metrics pipeline), so we test the other signal: have the content
-define its own custom spans that carry the content's CPU/memory as span
-attributes. Connect auto-instruments content and provides the OTel SDK, so
-`trace.get_tracer(...)` returns a working tracer and the spans are ingested by
-Connect's embedded collector along with the auto-instrumented request spans.
+Posit Connect does not forward content-emitted OTel *metrics* to the external
+endpoint, so we test the other signal: have the content define its own custom
+spans that carry the content's CPU/memory as span attributes. Connect
+auto-instruments content and provides the OTel SDK, so `trace.get_tracer(...)`
+returns a working tracer and the spans are ingested by Connect along with the
+auto-instrumented request spans.
 
 Each call to /work opens a custom span `content.resource.sample` and records the
 content worker's own CPU time, resident memory, and thread count (read from
