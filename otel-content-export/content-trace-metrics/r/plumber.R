@@ -4,9 +4,9 @@ library(plumber)
 #
 # This is the R parallel of ../python/app.py. The content opens a custom span per
 # request, records its own CPU/memory as span attributes, and marks the span
-# is_public = TRUE so Connect's embedded collector forwards it to the configured
-# [OTLPEndpoint] (the customer trace pipeline keeps only is_public spans when
-# OpenTelemetry.PublicTracesOnly is enabled, which is the default).
+# is_public = TRUE so Connect forwards it to the configured [OTLPEndpoint]
+# (Connect forwards only is_public spans when OpenTelemetry.PublicTracesOnly is
+# enabled, which is the default).
 #
 # NOTE: R content telemetry needs the otelsdk package, which Connect installs on
 # the telemetry rebuild. otelsdk is Rust-backed; on a host without a Rust
